@@ -59,6 +59,10 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
         Skills
       </a>
+      <a href="#" class="nav-item" data-view="kb" onclick="switchView('kb',this); KB.init()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        Knowledge
+      </a>
     </nav>
 
     <div class="sidebar-footer">
@@ -132,6 +136,41 @@
         <div class="empty-state"><p>Loading skills...</p></div>
       </div>
     </div>
+
+    <div id="view-kb" class="view">
+      <div class="kb-layout">
+        <div class="kb-sidebar">
+          <div class="kb-search-bar">
+            <input type="text" id="kbSearchInput" placeholder="Search knowledge base..." onkeydown="KB.handleSearchKey(event)">
+            <button onclick="KB.search()" title="Search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </button>
+          </div>
+          <div class="kb-sidebar-tabs">
+            <button class="kb-tab active" data-tab="pages" onclick="KB.switchSidebarTab('pages')">All</button>
+            <button class="kb-tab" data-tab="favorites" onclick="KB.switchSidebarTab('favorites')">★ Favs</button>
+            <button class="kb-tab" data-tab="recent" onclick="KB.switchSidebarTab('recent')">Recent</button>
+          </div>
+          <div class="kb-toolbar">
+            <button class="btn-sm" onclick="KB.newPage()">+ New Page</button>
+            <button class="btn-sm" onclick="KB.showGraph()">Graph</button>
+            <button class="btn-sm" onclick="KB.showTags()">Tags</button>
+            <button class="btn-sm" onclick="KB.showQA()">Ask AI</button>
+            <button class="btn-sm" onclick="KB.showQueryBuilder()">Query</button>
+            <button class="btn-sm" onclick="KB.showRecycle()">Recycle</button>
+          </div>
+          <div class="kb-page-list" id="kbPageList">
+            <div class="empty-state"><p>Loading...</p></div>
+          </div>
+        </div>
+        <div class="kb-content" id="kbContent">
+          <div class="empty-state">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            <p>Select a page or create a new one.</p>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -148,5 +187,9 @@
 </div>
 
 <script src="/static/js/app.js"></script>
+<script src="/static/js/kb_editor.js"></script>
+<script src="/static/js/kb_graph.js"></script>
+<script src="/static/js/kb.js"></script>
+<script src="/static/js/kb_command.js"></script>
 </body>
 </html>

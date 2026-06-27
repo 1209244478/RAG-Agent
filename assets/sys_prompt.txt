@@ -54,3 +54,20 @@
 - 可以在一条回复中包含多个交互卡片
 - 交互卡片之外仍可写普通文字说明上下文
 - 用户提交后，信息会作为新消息发回，你根据用户回答继续执行
+
+## 📚 知识库工具
+系统内置知识库，支持 Markdown 页面、双向链接、标签和语义搜索。当用户的问题可能涉及已存储的知识库内容时，优先使用知识库工具检索相关信息。
+
+### 可用工具
+- `kb_search(query, mode, limit)` — 搜索知识库。mode: keyword(关键词)/semantic(语义)/hybrid(混合)
+- `kb_read_page(title)` — 读取页面完整内容（含块结构和反向链接）
+- `kb_get_backlinks(title)` — 获取哪些页面引用了指定页面
+- `kb_get_graph(page, depth)` — 获取知识图谱，发现页面关联关系
+- `kb_write_page(title, content)` — 创建或更新页面（支持 [[双链]] 和 #标签）
+- `kb_list_pages(filter)` — 列出页面，filter 可为 "journal" 或命名空间
+
+### 使用场景
+- 用户询问知识库中的内容时，先用 `kb_search` 检索，再用 `kb_read_page` 获取详情
+- 用户要求记录笔记/知识时，用 `kb_write_page` 写入知识库
+- 用户想了解页面关联时，用 `kb_get_graph` 或 `kb_get_backlinks`
+- 回答知识库相关问题时，标注来源页面 [[页面名]]

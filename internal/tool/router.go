@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/genericagent/ga/internal/agent"
+	"github.com/genericagent/ga/internal/kb"
 	"github.com/genericagent/ga/internal/llm"
 	"github.com/genericagent/ga/internal/task"
 )
@@ -27,6 +28,7 @@ type Router struct {
 	AllowedDirs  []string
 	TaskRuntime  *task.Runtime // 子任务编排
 	CurrentTaskID string       // 当前任务ID
+	KBTools      *kb.KBTools   // 知识库工具
 }
 
 var blockedCommands = []string{
@@ -314,6 +316,8 @@ func (r *Router) Dispatch(toolName string, args map[string]any, response *llm.Re
 		return r.doSetGoal(args)
 	case "update_todo":
 		return r.doUpdateTodo(args)
+	case "kb_search", "kb_read_page", "kb_get_backlinks", "kb_get_graph", "kb_write_page", "kb_list_pages":
+		return r.doKBTool(toolName, args)
 	default:
 		return &agent.StepOutcome{
 			Data:       nil,
@@ -1240,6 +1244,29 @@ func (r *Router) doUpdateTodo(args map[string]any) *agent.StepOutcome {
 	return &agent.StepOutcome{
 		Data:       string(todosJSON),
 		NextPrompt: fmt.Sprintf("任务清单已更新:\n%s\n\n请继续执行下一项任务。", string(todosJSON)),
+	}
+}
+
+// doKBTool 处理知识库工具调用
+func (r *Router) doKBTool(toolName string, args map[string]any) *agent.StepOutcome {
+	if r.KBTools == nil {
+		return &agent.StepOutcome{
+			Data:       "[Error] 知识库未初始化",
+			NextPrompt: "知识库功能未启用。请使用其他方式完成任务。",
+		}
+	}
+
+	result, err := r.KBTools.HandleTool(toolName, args)
+	if err != nil {
+		return &agent.StepOutcome{
+			Data:       fmt.Sprintf("[Error] %v", err),
+			NextPrompt: fmt.Sprintf("知识库操作失败: %v\n\n请尝试其他方式。", err),
+		}
+	}
+
+	return &agent.StepOutcome{
+		Data:       result,
+		NextPrompt: fmt.Sprintf("知识库操作结果:\n%s\n\n请基于以上信息继续。", result),
 	}
 }
 

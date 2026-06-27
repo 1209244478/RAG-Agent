@@ -69,6 +69,10 @@ type Agent struct {
 
 	// 最终消息历史 (loop 结束后供 Runtime 持久化)
 	finalMessages []llm.Message
+
+	// 反思模块: 经验存储 (可选, 注入后任务结束自动反思)
+	ExpStore     *ExperienceStore
+	lastReflection *Reflection // 最近一次反思结果
 }
 
 func New(client *llm.Client, systemPrompt string, toolsSchema []llm.ToolSchema) *Agent {
@@ -115,6 +119,11 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 		var exitReason map[string]any
 		turn := 0
 		var fullResponseText string
+
+		// 反思模块统计
+		var toolCallsTotal int
+		var errorCount int
+		var toolsUsed []string
 
 		for turn < a.MaxTurns {
 		a.mu.Lock()
@@ -188,6 +197,7 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 			Temperature: a.Client.Temperature,
 		})
 		if err != nil {
+			errorCount++
 			ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("Error: %v", err), Source: "error"}
 			break
 		}
@@ -196,6 +206,7 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 		var collectedToolCalls []llm.ToolCall
 		for chunk := range streamCh {
 			if chunk.Error != nil {
+				errorCount++
 				ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("Error: %v", chunk.Error), Source: "error"}
 				break
 			}
@@ -228,15 +239,17 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 			exitReason = map[string]any{"result": "CURRENT_TASK_DONE", "data": fullContent}
 			break
 		} else {
-			for _, tc := range response.ToolCalls {
-				args := parseJSON(tc.Arguments)
-				toolCalls = append(toolCalls, toolCallInfo{
-					ToolName: tc.Name,
-					Args:     args,
-					ID:       tc.ID,
-				})
-			}
+		for _, tc := range response.ToolCalls {
+			args := parseJSON(tc.Arguments)
+			toolCalls = append(toolCalls, toolCallInfo{
+				ToolName: tc.Name,
+				Args:     args,
+				ID:       tc.ID,
+			})
+			toolCallsTotal++
+			toolsUsed = append(toolsUsed, tc.Name)
 		}
+	}
 
 		var toolResults []llm.ToolResult
 		var nextPrompts []string
@@ -338,6 +351,28 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 		a.finalMessages = messages
 		a.mu.Unlock()
 
+		// 反思模块: 任务结束后自动评估并沉淀经验
+		if a.ExpStore != nil {
+			exitReasonStr, _ := exitReason["result"].(string)
+			goal := a.Goal
+			if goal == "" && a.GoalTracker != nil {
+				goal = a.GoalTracker.Objective()
+			}
+			if goal == "" {
+				goal = userInput
+			}
+			duration := time.Since(startTime)
+			r, err := Reflect(a.ExpStore, goal, a.TaskID, exitReasonStr, turn, a.MaxTurns, duration, toolCallsTotal, errorCount, toolsUsed, "")
+			if err != nil {
+				ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("⚠️ 反思失败: %v", err), Source: "reflection"}
+			} else {
+				a.mu.Lock()
+				a.lastReflection = r
+				a.mu.Unlock()
+				ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("🪞 反思: %s | 评分 %.2f | %d 条经验", r.Evaluation.Outcome, r.Evaluation.Score, len(r.Lessons)), Source: "reflection"}
+			}
+		}
+
 		doneContent := fmt.Sprintf("\n[Done] %v", exitReason["result"])
 		ch <- DisplayItem{Turn: turn, Content: fullResponseText, Done: true, Source: source, Outputs: []string{doneContent}}
 	}()
@@ -349,6 +384,13 @@ func (a *Agent) GetFinalMessages() []llm.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.finalMessages
+}
+
+// GetLastReflection 获取最近一次反思结果 (loop 结束后调用)
+func (a *Agent) GetLastReflection() *Reflection {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastReflection
 }
 
 func (a *Agent) Abort() {

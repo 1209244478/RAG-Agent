@@ -38,6 +38,7 @@ deploy.py
 # Go build artifacts
 server
 server_linux
+server_linux_new
 ga-server-linux
 ga-linux
 ga

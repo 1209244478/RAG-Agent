@@ -16,6 +16,7 @@ import (
 	"github.com/genericagent/ga/internal/agent"
 	"github.com/genericagent/ga/internal/auth"
 	"github.com/genericagent/ga/internal/config"
+	"github.com/genericagent/ga/internal/kb"
 	"github.com/genericagent/ga/internal/llm"
 	"github.com/genericagent/ga/internal/memory"
 	"github.com/genericagent/ga/internal/task"
@@ -25,16 +26,31 @@ import (
 )
 
 type Handler struct {
-	users     *auth.UserStore
-	codes     *auth.CodeStore
-	jwtMgr    *auth.JWTManager
-	smtpCfg   auth.SMTPConfig
-	wsMgr     *workspace.Manager
-	rootDir   string
-	skillDir  string
-	upgrader  websocket.Upgrader
-	sessions  map[int64]*Session
-	taskRT    *task.Runtime
+	users      *auth.UserStore
+	codes      *auth.CodeStore
+	jwtMgr     *auth.JWTManager
+	smtpCfg    auth.SMTPConfig
+	wsMgr      *workspace.Manager
+	rootDir    string
+	skillDir   string
+	upgrader   websocket.Upgrader
+	sessions   map[int64]*Session
+	taskRT     *task.Runtime
+	kbStore    *kb.Store
+	kbLinker   *kb.Linker
+	kbGraph    *kb.Graph
+	kbEmbed    *kb.EmbeddingEngine
+	kbQA       *kb.QAEngineFactory
+	kbSuggest  *kb.SuggestionEngine
+	kbTools    *kb.KBTools
+	kbJournal  *kb.Journal
+	kbTask     *kb.TaskManager
+	kbEmbedEng *kb.Embed
+	kbTemplate *kb.Template
+	kbVersion  *kb.Version
+	kbQuery    *kb.QueryEngine
+	kbImporter *kb.Importer
+	expStore   *agent.ExperienceStore // 反思模块: 经验存储
 }
 
 type Session struct {
@@ -55,6 +71,12 @@ func NewHandler(
 ) *Handler {
 	// 创建 Task Runtime (先创建 store 和 runtime shell, factory 内引用 runtime 指针)
 	store := task.NewStore(filepath.Join(rootDir, "data"))
+	// 反思模块: 共享的经验存储 (跨任务复用)
+	expStore := agent.NewExperienceStore(filepath.Join(rootDir, "data", "experience"))
+	if err := expStore.Load(); err != nil {
+		log.Printf("[Reflection] Failed to load experience store: %v", err)
+	}
+	var kbToolsRef *kb.KBTools // 在 factory 之前声明，KB 初始化后赋值，闭包捕获
 	var taskRT *task.Runtime
 	taskRT = task.NewRuntime(store, func(cfg task.AgentConfig) *agent.Agent {
 		// 加载 LLM 配置
@@ -89,12 +111,14 @@ func NewHandler(
 		a.TaskID = cfg.TaskID
 		a.CwdOverride = cfg.CwdOverride
 		a.PlanApprovalCh = make(chan bool, 1)
+		a.ExpStore = expStore // 注入反思模块
 		// planApproved channel 在 loop 首次 plan_submit 时初始化
 		router := tool.NewRouter(userDir)
 		router.SkillDir = skillDir
 		router.AllowedDirs = []string{skillDir}
 		router.TaskRuntime = taskRT
 		router.CurrentTaskID = cfg.TaskID
+		router.KBTools = kbToolsRef
 		if cfg.CwdOverride != "" {
 			router.Cwd = cfg.CwdOverride
 		}
@@ -105,19 +129,101 @@ func NewHandler(
 	// 恢复未完成任务
 	taskRT.Restore()
 
+	// 初始化知识库引擎
+	kbStore, err := kb.NewStore(filepath.Join(rootDir, "data", "kb.db"))
+	if err != nil {
+		log.Printf("[KB] Failed to init kb store: %v", err)
+	}
+	var kbLinker *kb.Linker
+	var kbGraph *kb.Graph
+	var kbEmbed *kb.EmbeddingEngine
+	var kbQA *kb.QAEngineFactory
+	var kbSuggest *kb.SuggestionEngine
+	var kbTools *kb.KBTools
+	if kbStore != nil {
+		kbLinker = kb.NewLinker(kbStore)
+		kbGraph = kb.NewGraph(kbStore, kbLinker)
+
+		// 初始化向量化引擎（复用 LLM 配置）
+		loaded, _ := config.Load()
+		if loaded != nil {
+			for _, lc := range loaded.LLMs {
+				kbEmbed = kb.NewEmbeddingEngine(kbStore, kb.EmbeddingConfig{
+					APIBase: lc.APIBase,
+					APIKey:  lc.APIKey,
+					Model:   "text-embedding-3-small",
+				})
+				// 创建 LLM 客户端用于 QA 和推荐
+				llmClient := &llm.Client{
+					APIBase:        lc.APIBase,
+					APIKey:         lc.APIKey,
+					Model:          lc.Model,
+					APIMode:        lc.APIMode,
+					Name:           lc.Name,
+					Stream:         true,
+					MaxTokens:      lc.MaxTokens,
+					Temperature:    lc.Temperature,
+					ContextWin:     lc.ContextWin,
+					ConnectTimeout: time.Duration(lc.ConnectTimeout) * time.Second,
+					ReadTimeout:    time.Duration(lc.ReadTimeout) * time.Second,
+					MaxRetries:     lc.MaxRetries,
+				}
+				kbQA = kb.NewQAEngineFactory(kbStore, kbLinker, kbGraph, kbEmbed, llmClient)
+				kbSuggest = kb.NewSuggestionEngine(kbStore, kbLinker, kbGraph, llmClient)
+				break
+			}
+		}
+
+		kbTools = kb.NewKBTools(kbStore, kbLinker, kbGraph, kbEmbed)
+		kbToolsRef = kbTools
+	}
+
+	// 初始化阶段 5 高级特性引擎
+	var kbJournal *kb.Journal
+	var kbTaskMgr *kb.TaskManager
+	var kbEmbedEng *kb.Embed
+	var kbTemplate *kb.Template
+	var kbVersion *kb.Version
+	var kbQuery *kb.QueryEngine
+	var kbImporter *kb.Importer
+	if kbStore != nil {
+		kbJournal = kb.NewJournal(kbStore)
+		kbTaskMgr = kb.NewTaskManager(kbStore)
+		kbEmbedEng = kb.NewEmbed(kbStore)
+		kbTemplate = kb.NewTemplate(kbStore)
+		kbVersion = kb.NewVersion(kbStore)
+		kbQuery = kb.NewQueryEngine(kbStore)
+		kbImporter = kb.NewImporter(kbStore, kbLinker)
+	}
+
 	return &Handler{
-		users:    users,
-		codes:    codes,
-		jwtMgr:   jwtMgr,
-		smtpCfg:  smtpCfg,
-		wsMgr:    wsMgr,
-		rootDir:  rootDir,
-		skillDir: skillDir,
+		users:     users,
+		codes:     codes,
+		jwtMgr:    jwtMgr,
+		smtpCfg:   smtpCfg,
+		wsMgr:     wsMgr,
+		rootDir:   rootDir,
+		skillDir:  skillDir,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		sessions: make(map[int64]*Session),
-		taskRT:   taskRT,
+		sessions:  make(map[int64]*Session),
+		taskRT:    taskRT,
+		kbStore:   kbStore,
+		kbLinker:  kbLinker,
+		kbGraph:   kbGraph,
+		kbEmbed:   kbEmbed,
+		kbQA:      kbQA,
+		kbSuggest: kbSuggest,
+		kbTools:   kbTools,
+		kbJournal: kbJournal,
+		kbTask:    kbTaskMgr,
+		kbEmbedEng: kbEmbedEng,
+		kbTemplate: kbTemplate,
+		kbVersion: kbVersion,
+		kbQuery:   kbQuery,
+		kbImporter: kbImporter,
+		expStore:  expStore,
 	}
 }
 
@@ -305,6 +411,7 @@ func (h *Handler) RunAgent(c *gin.Context) {
 	router := tool.NewRouter(userDir)
 	router.SkillDir = h.skillDir
 	router.AllowedDirs = []string{h.skillDir}
+	router.KBTools = h.kbTools
 	a.Handler = router.Dispatch
 
 	ch := a.Run(req.Prompt, "web", chatHistoryToMessages(func() []ChatMessage {
@@ -426,6 +533,7 @@ func (h *Handler) StreamAgent(c *gin.Context) {
 	router := tool.NewRouter(userDir)
 	router.SkillDir = h.skillDir
 	router.AllowedDirs = []string{h.skillDir}
+	router.KBTools = h.kbTools
 	a.Handler = router.Dispatch
 
 	c.Header("Content-Type", "text/event-stream")
@@ -573,6 +681,7 @@ func (h *Handler) WebSocketAgent(c *gin.Context) {
 	router := tool.NewRouter(userDir)
 	router.SkillDir = h.skillDir
 	router.AllowedDirs = []string{h.skillDir}
+	router.KBTools = h.kbTools
 	a.Handler = router.Dispatch
 
 	ch := a.Run(req.Prompt, "ws", chatHistoryToMessages(func() []ChatMessage {
@@ -1518,4 +1627,35 @@ func (h *Handler) GetTask(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"task": t.State})
+}
+
+// ==================== 反思模块 API ====================
+
+// ListExperiences 列出历史经验
+func (h *Handler) ListExperiences(c *gin.Context) {
+	if h.expStore == nil {
+		c.JSON(http.StatusOK, gin.H{"experiences": []any{}, "strategies": []any{}})
+		return
+	}
+	limit := 50
+	exps := h.expStore.ListExperiences(limit)
+	strats := h.expStore.ListStrategies()
+	c.JSON(http.StatusOK, gin.H{
+		"experiences": exps,
+		"strategies":  strats,
+		"total":       len(exps),
+	})
+}
+
+// ListStrategies 列出所有策略
+func (h *Handler) ListStrategies(c *gin.Context) {
+	if h.expStore == nil {
+		c.JSON(http.StatusOK, gin.H{"strategies": []any{}})
+		return
+	}
+	strats := h.expStore.ListStrategies()
+	c.JSON(http.StatusOK, gin.H{
+		"strategies": strats,
+		"total":      len(strats),
+	})
 }
