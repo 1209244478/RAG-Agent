@@ -140,7 +140,7 @@ func newTestUserStore(t *testing.T) *UserStore {
 func TestUserStore_CreateAndGet(t *testing.T) {
 	store := newTestUserStore(t)
 
-	user, err := store.Create("test@example.com", "password123", "测试用户")
+	user, err := store.Create("test@example.com", "password123", "测试用户", "user")
 	if err != nil {
 		t.Fatalf("Create 失败: %v", err)
 	}
@@ -206,13 +206,13 @@ func TestUserStore_GetByID_NotFound(t *testing.T) {
 func TestUserStore_DuplicateEmail(t *testing.T) {
 	store := newTestUserStore(t)
 
-	_, err := store.Create("dup@test.com", "pass1", "用户1")
+	_, err := store.Create("dup@test.com", "pass1", "用户1", "user")
 	if err != nil {
 		t.Fatalf("第一次 Create 失败: %v", err)
 	}
 
 	// 同一 email 再次创建应失败
-	_, err = store.Create("dup@test.com", "pass2", "用户2")
+	_, err = store.Create("dup@test.com", "pass2", "用户2", "user")
 	if err == nil {
 		t.Error("重复 email 应返回错误")
 	}
@@ -221,7 +221,7 @@ func TestUserStore_DuplicateEmail(t *testing.T) {
 func TestUserStore_VerifyPassword(t *testing.T) {
 	store := newTestUserStore(t)
 
-	createdUser, _ := store.Create("verify@test.com", "correct-password", "测试")
+	createdUser, _ := store.Create("verify@test.com", "correct-password", "测试", "user")
 	// Create 返回的 User 不含 password 哈希, 需从 DB 重新查询
 	user, _ := store.GetByEmail("verify@test.com")
 	if user == nil {
@@ -249,7 +249,7 @@ func TestUserStore_VerifyPassword(t *testing.T) {
 func TestUserStore_PasswordHashed(t *testing.T) {
 	store := newTestUserStore(t)
 
-	store.Create("hash@test.com", "plaintext", "测试")
+	store.Create("hash@test.com", "plaintext", "测试", "user")
 	// 从 DB 查询获取实际存储的 password 字段
 	user, _ := store.GetByEmail("hash@test.com")
 
@@ -266,7 +266,7 @@ func TestUserStore_PasswordHashed(t *testing.T) {
 
 func TestUserStore_CreateSession(t *testing.T) {
 	store := newTestUserStore(t)
-	user, _ := store.Create("session@test.com", "pass", "测试")
+	user, _ := store.Create("session@test.com", "pass", "测试", "user")
 
 	sess, err := store.CreateSession(user.ID, "工作会话")
 	if err != nil {
@@ -285,7 +285,7 @@ func TestUserStore_CreateSession(t *testing.T) {
 
 func TestUserStore_CreateSession_DefaultName(t *testing.T) {
 	store := newTestUserStore(t)
-	user, _ := store.Create("default@test.com", "pass", "测试")
+	user, _ := store.Create("default@test.com", "pass", "测试", "user")
 
 	// 空名称应默认为 "default"
 	sess, err := store.CreateSession(user.ID, "")
@@ -299,7 +299,7 @@ func TestUserStore_CreateSession_DefaultName(t *testing.T) {
 
 func TestUserStore_ListSessions(t *testing.T) {
 	store := newTestUserStore(t)
-	user, _ := store.Create("list@test.com", "pass", "测试")
+	user, _ := store.Create("list@test.com", "pass", "测试", "user")
 
 	// 创建多个会话
 	store.CreateSession(user.ID, "会话1")
@@ -317,7 +317,7 @@ func TestUserStore_ListSessions(t *testing.T) {
 
 func TestUserStore_GetSession(t *testing.T) {
 	store := newTestUserStore(t)
-	user, _ := store.Create("getsession@test.com", "pass", "测试")
+	user, _ := store.Create("getsession@test.com", "pass", "测试", "user")
 
 	sess, _ := store.CreateSession(user.ID, "测试会话")
 
@@ -345,7 +345,7 @@ func TestUserStore_GetSession(t *testing.T) {
 
 func TestUserStore_DeleteSession(t *testing.T) {
 	store := newTestUserStore(t)
-	user, _ := store.Create("delete@test.com", "pass", "测试")
+	user, _ := store.Create("delete@test.com", "pass", "测试", "user")
 
 	sess, _ := store.CreateSession(user.ID, "待删除")
 
@@ -363,7 +363,7 @@ func TestUserStore_DeleteSession(t *testing.T) {
 
 func TestUserStore_EnsureDefaultSession(t *testing.T) {
 	store := newTestUserStore(t)
-	user, _ := store.Create("ensure@test.com", "pass", "测试")
+	user, _ := store.Create("ensure@test.com", "pass", "测试", "user")
 
 	// 首次调用应创建默认会话
 	sess, err := store.EnsureDefaultSession(user.ID)
@@ -499,7 +499,7 @@ func TestAuth_FullWorkflow(t *testing.T) {
 	store := newTestUserStore(t)
 
 	// 1. 注册用户
-	user, err := store.Create("workflow@test.com", "mypassword", "工作流用户")
+	user, err := store.Create("workflow@test.com", "mypassword", "工作流用户", "user")
 	if err != nil {
 		t.Fatalf("注册失败: %v", err)
 	}

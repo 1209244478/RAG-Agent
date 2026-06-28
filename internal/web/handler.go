@@ -257,10 +257,11 @@ func (h *Handler) SendCode(c *gin.Context) {
 
 func (h *Handler) Register(c *gin.Context) {
 	var req struct {
-		Email string `json:"email" binding:"required,email"`
-		Code  string `json:"code" binding:"required"`
-		Pwd   string `json:"password" binding:"required,min=6"`
-		Name  string `json:"name"`
+		Email    string `json:"email" binding:"required,email"`
+		Code     string `json:"code" binding:"required"`
+		Pwd      string `json:"password" binding:"required,min=6"`
+		Name     string `json:"name"`
+		UserType string `json:"user_type"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: " + err.Error()})
@@ -289,7 +290,12 @@ func (h *Handler) Register(c *gin.Context) {
 		name = parts[0]
 	}
 
-	user, err := h.users.Create(req.Email, req.Pwd, name)
+	userType := req.UserType
+	if userType == "" {
+		userType = "user"
+	}
+
+	user, err := h.users.Create(req.Email, req.Pwd, name, userType)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "registration failed"})
 		return
@@ -299,9 +305,10 @@ func (h *Handler) Register(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
 		"user": gin.H{
-			"id":    user.ID,
-			"email": user.Email,
-			"name":  user.Name,
+			"id":        user.ID,
+			"email":     user.Email,
+			"name":      user.Name,
+			"user_type": user.UserType,
 		},
 	})
 }
@@ -335,9 +342,10 @@ func (h *Handler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
 		"user": gin.H{
-			"id":    user.ID,
-			"email": user.Email,
-			"name":  user.Name,
+			"id":        user.ID,
+			"email":     user.Email,
+			"name":      user.Name,
+			"user_type": user.UserType,
 		},
 	})
 }
@@ -353,6 +361,7 @@ func (h *Handler) GetProfile(c *gin.Context) {
 		"id":         user.ID,
 		"email":      user.Email,
 		"name":       user.Name,
+		"user_type":  user.UserType,
 		"created_at": user.CreatedAt,
 	})
 }
@@ -1002,6 +1011,8 @@ func (h *Handler) ListSkills(c *gin.Context) {
 		Name        string                 `json:"name"`
 		Description string                 `json:"description"`
 		HasDir      bool                   `json:"has_dir"`
+		IsPrompt    bool                   `json:"is_prompt"`
+		WhenToUse   string                 `json:"when_to_use,omitempty"`
 		Templates   []map[string]any       `json:"templates,omitempty"`
 	}
 
@@ -1045,9 +1056,15 @@ func (h *Handler) ListSkills(c *gin.Context) {
 		}
 
 		if dirs[skillName] {
+			if meta := loadSkillMeta(h.skillDir, skillName); meta != nil {
+				if meta.Description != "" {
+					info.Description = meta.Description
+				}
+				info.WhenToUse = meta.WhenToUse
+			}
 			skillMd := filepath.Join(h.skillDir, skillName, "SKILL.md")
 			if data, err := os.ReadFile(skillMd); err == nil {
-				if desc := extractSkillDescription(string(data)); desc != "" {
+				if desc := extractSkillDescription(string(data)); desc != "" && info.Description == "" {
 					info.Description = desc
 				}
 			}
@@ -1072,6 +1089,35 @@ func (h *Handler) ListSkills(c *gin.Context) {
 			}
 		}
 
+		skills = append(skills, info)
+	}
+
+	// 纯提示词 skill: 含 SKILL.md 但无对应 .py 的目录
+	for dirName := range dirs {
+		processed := false
+		for _, s := range skills {
+			if s.Name == dirName {
+				processed = true
+				break
+			}
+		}
+		if processed {
+			continue
+		}
+		meta := loadSkillMeta(h.skillDir, dirName)
+		if meta == nil {
+			continue
+		}
+		info := SkillInfo{
+			Name:        dirName,
+			HasDir:      true,
+			IsPrompt:    true,
+			Description: meta.Description,
+			WhenToUse:   meta.WhenToUse,
+		}
+		if info.Description == "" {
+			info.Description = "提示词技能 (查阅 SKILL.md)"
+		}
 		skills = append(skills, info)
 	}
 
