@@ -471,13 +471,13 @@ func (h *Handler) RunAgent(c *gin.Context) {
 		for _, hi := range historyItems {
 			h.saveChatMessageSession(userID, req.SessionID, hi.Role, hi.Content, hi.ToolCalls, hi.ToolCallID)
 		}
-		h.saveChatMessageSession(userID, req.SessionID, "agent", finalContent, nil, "")
+		h.saveChatMessageSession(userID, req.SessionID, "assistant", finalContent, nil, "")
 	} else {
 		h.saveChatMessage(userID, "user", req.Prompt, nil, "")
 		for _, hi := range historyItems {
 			h.saveChatMessage(userID, hi.Role, hi.Content, hi.ToolCalls, hi.ToolCallID)
 		}
-		h.saveChatMessage(userID, "agent", finalContent, nil, "")
+		h.saveChatMessage(userID, "assistant", finalContent, nil, "")
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -628,9 +628,9 @@ func (h *Handler) StreamAgent(c *gin.Context) {
 
 	// Save final agent response
 	if req.SessionID > 0 {
-		h.saveChatMessageSession(userID, req.SessionID, "agent", finalContent, nil, "")
+		h.saveChatMessageSession(userID, req.SessionID, "assistant", finalContent, nil, "")
 	} else {
-		h.saveChatMessage(userID, "agent", finalContent, nil, "")
+		h.saveChatMessage(userID, "assistant", finalContent, nil, "")
 	}
 }
 
@@ -759,9 +759,9 @@ func (h *Handler) WebSocketAgent(c *gin.Context) {
 	}
 
 	if req.SessionID > 0 {
-		h.saveChatMessageSession(userID, req.SessionID, "agent", finalContent, nil, "")
+		h.saveChatMessageSession(userID, req.SessionID, "assistant", finalContent, nil, "")
 	} else {
-		h.saveChatMessage(userID, "agent", finalContent, nil, "")
+		h.saveChatMessage(userID, "assistant", finalContent, nil, "")
 	}
 }
 
@@ -1404,8 +1404,13 @@ func (h *Handler) saveChatMessageSession(userID int64, sessionID int64, role str
 func chatHistoryToMessages(history []ChatMessage) []llm.Message {
 	var messages []llm.Message
 	for _, m := range history {
+		role := m.Role
+		// 兼容旧数据：将 "agent" 角色转换为 "assistant"
+		if role == "agent" {
+			role = "assistant"
+		}
 		msg := llm.Message{
-			Role:       m.Role,
+			Role:       role,
 			Content:    m.Content,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
@@ -1552,10 +1557,10 @@ func (h *Handler) StartTask(c *gin.Context) {
 		OnComplete: func(userID int64, sessionID int64, finalContent string) {
 			if sessionID > 0 {
 				h.saveChatMessageSession(userID, sessionID, "user", req.Prompt, nil, "")
-				h.saveChatMessageSession(userID, sessionID, "agent", finalContent, nil, "")
+				h.saveChatMessageSession(userID, sessionID, "assistant", finalContent, nil, "")
 			} else {
 				h.saveChatMessage(userID, "user", req.Prompt, nil, "")
-				h.saveChatMessage(userID, "agent", finalContent, nil, "")
+				h.saveChatMessage(userID, "assistant", finalContent, nil, "")
 			}
 		},
 	})
