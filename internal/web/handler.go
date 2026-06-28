@@ -1325,12 +1325,12 @@ type ChatMessage struct {
 }
 
 func (h *Handler) chatHistoryPath(userID int64) string {
-	userDir := h.wsMgr.UserDir(userID)
+	userDir := h.wsMgr.UserBaseDir(userID)
 	return filepath.Join(userDir, ".chat_history.json")
 }
 
 func (h *Handler) chatHistoryPathSession(userID int64, sessionID int64) string {
-	userDir := h.wsMgr.UserDir(userID)
+	userDir := h.wsMgr.UserBaseDir(userID)
 	return filepath.Join(userDir, fmt.Sprintf(".chat_history_%d.json", sessionID))
 }
 
