@@ -1549,6 +1549,15 @@ func (h *Handler) StartTask(c *gin.Context) {
 		Goal:      req.Goal,
 		PlanMode:  req.PlanMode,
 		History:   history,
+		OnComplete: func(userID int64, sessionID int64, finalContent string) {
+			if sessionID > 0 {
+				h.saveChatMessageSession(userID, sessionID, "user", req.Prompt, nil, "")
+				h.saveChatMessageSession(userID, sessionID, "agent", finalContent, nil, "")
+			} else {
+				h.saveChatMessage(userID, "user", req.Prompt, nil, "")
+				h.saveChatMessage(userID, "agent", finalContent, nil, "")
+			}
+		},
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
