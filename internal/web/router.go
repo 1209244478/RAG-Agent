@@ -5,7 +5,12 @@ import "github.com/gin-gonic/gin"
 func SetupRouter(h *Handler) *gin.Engine {
 	r := gin.Default()
 
-	r.Use(CORSMiddleware())
+	r.Use(CORSMiddleware([]string{
+		"http://localhost:8080", "http://127.0.0.1:8080",
+		"http://localhost:3000", "http://127.0.0.1:3000",
+		"http://localhost:5173", "http://127.0.0.1:5173",
+	}))
+	r.Use(BodyLimitMiddleware(32 << 20))
 
 	r.Static("/static", "./web")
 	r.StaticFile("/", "./web/app.html")

@@ -151,49 +151,5 @@
         "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "任务状态"}},
       "required": ["content", "status"]}}}},
     "required": ["todos"]}}
-  }},
-  {"type": "function", "function": {
-    "name": "kb_search",
-    "description": "搜索知识库。支持关键词搜索(keyword)、语义搜索(semantic)和混合搜索(hybrid)。当需要查找知识库中的信息时使用",
-    "parameters": {"type": "object", "properties": {
-      "query": {"type": "string", "description": "搜索查询"},
-      "mode": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "description": "搜索模式，默认 keyword"},
-      "limit": {"type": "integer", "description": "返回结果数量，默认 10"}}},
-    "required": ["query"]}}
-  }},
-  {"type": "function", "function": {
-    "name": "kb_read_page",
-    "description": "读取知识库页面的完整内容，包括块结构和反向链接",
-    "parameters": {"type": "object", "properties": {
-      "title": {"type": "string", "description": "页面标题"}}},
-    "required": ["title"]}}
-  }},
-  {"type": "function", "function": {
-    "name": "kb_get_backlinks",
-    "description": "获取知识库页面的反向链接（哪些页面引用了此页面）",
-    "parameters": {"type": "object", "properties": {
-      "title": {"type": "string", "description": "页面标题"}}},
-    "required": ["title"]}}
-  }},
-  {"type": "function", "function": {
-    "name": "kb_get_graph",
-    "description": "获取知识图谱数据，发现页面之间的关联关系。可指定中心页面获取局部图谱",
-    "parameters": {"type": "object", "properties": {
-      "page": {"type": "string", "description": "中心页面标题（可选，不指定则返回完整图谱概览）"},
-      "depth": {"type": "integer", "description": "图谱深度，默认 1"}}}}}
-  }},
-  {"type": "function", "function": {
-    "name": "kb_write_page",
-    "description": "创建或更新知识库页面。内容为 Markdown 格式，支持 [[双链]] 和 #标签",
-    "parameters": {"type": "object", "properties": {
-      "title": {"type": "string", "description": "页面标题"},
-      "content": {"type": "string", "description": "页面内容（Markdown 格式）"}}},
-    "required": ["title", "content"]}}
-  }},
-  {"type": "function", "function": {
-    "name": "kb_list_pages",
-    "description": "列出知识库中的页面。可按类型过滤：journal(日记)、命名空间名称",
-    "parameters": {"type": "object", "properties": {
-      "filter": {"type": "string", "description": "过滤条件：journal(日记) 或命名空间名称（可选）"}}}}}
   }}
 ]

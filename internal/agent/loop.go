@@ -21,13 +21,13 @@ type StepOutcome struct {
 type ToolHandler func(toolName string, args map[string]any, response *llm.Response, index int, toolNum int) *StepOutcome
 
 type DisplayItem struct {
-	Turn       int
-	Content    string
-	Done       bool
-	Source     string
-	Outputs    []string
-	ToolCalls  []llm.ToolCall
-	ToolCallID string
+	Turn       int            `json:"turn"`
+	Content    string         `json:"content"`
+	Done       bool           `json:"done"`
+	Source     string         `json:"source"`
+	Outputs    []string       `json:"outputs,omitempty"`
+	ToolCalls  []llm.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
 
 type Agent struct {
@@ -71,7 +71,7 @@ type Agent struct {
 	finalMessages []llm.Message
 
 	// 反思模块: 经验存储 (可选, 注入后任务结束自动反思)
-	ExpStore     *ExperienceStore
+	ExpStore      *ExperienceStore
 	lastReflection *Reflection // 最近一次反思结果
 }
 
@@ -190,25 +190,41 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 		}
 
 		var response *llm.Response
-		streamCh, err := a.Client.ChatStream(llm.ChatParams{
-			Messages:    messages,
-			Tools:       a.ToolsSchema,
-			MaxTokens:   a.Client.MaxTokens,
-			Temperature: a.Client.Temperature,
-		})
-		if err != nil {
+		var streamCh <-chan llm.StreamChunk
+		var streamErr error
+		for retry := 0; retry < 3; retry++ {
+			streamCh, streamErr = a.Client.ChatStream(llm.ChatParams{
+				Messages:    messages,
+				Tools:       a.ToolsSchema,
+				MaxTokens:   a.Client.MaxTokens,
+				Temperature: a.Client.Temperature,
+			})
+			if streamErr == nil {
+				break
+			}
+			if retry < 2 {
+				ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("⚠️ LLM 连接失败 (%v)，%d秒后重试...", streamErr, retry+1), Source: "retry"}
+				time.Sleep(time.Duration(retry+1) * time.Second)
+			}
+		}
+		if streamErr != nil {
 			errorCount++
-			ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("Error: %v", err), Source: "error"}
+			ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("Error: %v", streamErr), Source: "error"}
 			break
 		}
 
 		var fullContent string
+		var fullThinking string
 		var collectedToolCalls []llm.ToolCall
 		for chunk := range streamCh {
 			if chunk.Error != nil {
 				errorCount++
 				ch <- DisplayItem{Turn: turn, Content: fmt.Sprintf("Error: %v", chunk.Error), Source: "error"}
 				break
+			}
+			if chunk.Reasoning != "" {
+				fullThinking += chunk.Reasoning
+				ch <- DisplayItem{Turn: turn, Content: chunk.Reasoning, Source: "thinking"}
 			}
 			if chunk.Text != "" {
 				fullContent += chunk.Text
@@ -218,6 +234,12 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 			}
 			if len(chunk.ToolCalls) > 0 {
 				collectedToolCalls = append(collectedToolCalls, chunk.ToolCalls...)
+			}
+			// 记录真实 usage, 自校准 token 估算
+			if chunk.Usage != nil && chunk.Usage.InputTokens > 0 {
+				if a.ContextMgr != nil {
+					a.ContextMgr.RecordRealUsage(chunk.Usage.InputTokens, messages)
+				}
 			}
 			if chunk.Done {
 				break
@@ -234,22 +256,27 @@ func (a *Agent) Run(userInput string, source string, history []llm.Message) <-ch
 		var toolCalls []toolCallInfo
 		if len(response.ToolCalls) == 0 {
 			if fullContent == "" {
-				ch <- DisplayItem{Turn: turn, Content: "", Source: "final"}
+				if fullThinking != "" {
+					// LLM 仅输出思考未输出正文 (常见于 max_tokens 被思考耗尽)
+					ch <- DisplayItem{Turn: turn, Content: "思考已完成，但未生成正文内容（可能受 max_tokens 限制）。请增大 LLM_MAX_TOKENS 或简化请求。", Source: "final"}
+				} else {
+					ch <- DisplayItem{Turn: turn, Content: "", Source: "final"}
+				}
 			}
 			exitReason = map[string]any{"result": "CURRENT_TASK_DONE", "data": fullContent}
 			break
 		} else {
-		for _, tc := range response.ToolCalls {
-			args := parseJSON(tc.Arguments)
-			toolCalls = append(toolCalls, toolCallInfo{
-				ToolName: tc.Name,
-				Args:     args,
-				ID:       tc.ID,
-			})
-			toolCallsTotal++
-			toolsUsed = append(toolsUsed, tc.Name)
+			for _, tc := range response.ToolCalls {
+				args := parseJSON(tc.Arguments)
+				toolCalls = append(toolCalls, toolCallInfo{
+					ToolName: tc.Name,
+					Args:     args,
+					ID:       tc.ID,
+				})
+				toolCallsTotal++
+				toolsUsed = append(toolsUsed, tc.Name)
+			}
 		}
-	}
 
 		var toolResults []llm.ToolResult
 		var nextPrompts []string

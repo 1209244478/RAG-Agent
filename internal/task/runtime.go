@@ -20,6 +20,7 @@ type Task struct {
 	ctx          context.Context
 	mu           sync.RWMutex
 	subscribers  map[chan agent.DisplayItem]bool
+	displayHistory []agent.DisplayItem // 缓存历史输出，供迟到的订阅者重放
 	done         chan struct{}
 	planApproval chan bool // 计划审批信号
 
@@ -119,6 +120,12 @@ func (r *Runtime) Start(cfg TaskConfig) (*Task, error) {
 		History:     cfg.History,
 		CwdOverride: cfg.CwdOverride,
 	})
+
+	// F4: 设置上下文元数据持久化路径 (compactionHistory + calibration 落盘)
+	if a.ContextMgr != nil {
+		metaPath := filepath.Join(r.store.taskDir(cfg.UserID, taskID), "context_meta.json")
+		a.ContextMgr.SetMetaPath(metaPath)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &Task{
@@ -229,29 +236,45 @@ func (r *Runtime) runTask(t *Task, cfg TaskConfig) {
 				Source:  "plan_paused",
 			})
 
-			// 等待审批
-			approved := <-t.planApproval
-			t.State.Status = StatusRunning
-			t.State.PendingPlan = ""
-			r.store.Save(t.State)
+			// 等待审批 (带超时，默认 10 分钟)
+			planTimeout := 10 * time.Minute
+			select {
+			case approved := <-t.planApproval:
+				t.State.Status = StatusRunning
+				t.State.PendingPlan = ""
+				r.store.Save(t.State)
 
-			if !approved {
+				if !approved {
+					t.State.Status = StatusKilled
+					t.State.Error = "plan rejected"
+					now := time.Now()
+					t.State.EndTime = &now
+					r.store.Save(t.State)
+					r.broadcast(t, agent.DisplayItem{Done: true, Source: "task_end"})
+					return
+				}
+
+				// 审批通过, 通知 agent 继续
+				t.Agent.ApprovePlan()
+				r.broadcast(t, agent.DisplayItem{
+					Turn:    item.Turn,
+					Content: "✅ 计划已批准，继续执行...",
+					Source:  "plan_approved",
+				})
+			case <-time.After(planTimeout):
 				t.State.Status = StatusKilled
-				t.State.Error = "plan rejected"
+				t.State.Error = "plan approval timeout"
 				now := time.Now()
 				t.State.EndTime = &now
 				r.store.Save(t.State)
+				r.broadcast(t, agent.DisplayItem{
+					Turn:    item.Turn,
+					Content: fmt.Sprintf("⏰ 计划审批超时 (%v)，任务已终止", planTimeout),
+					Source:  "plan_timeout",
+				})
 				r.broadcast(t, agent.DisplayItem{Done: true, Source: "task_end"})
 				return
 			}
-
-			// 审批通过, 通知 agent 继续
-			t.Agent.ApprovePlan()
-			r.broadcast(t, agent.DisplayItem{
-				Turn:    item.Turn,
-				Content: "✅ 计划已批准，继续执行...",
-				Source:  "plan_approved",
-			})
 		}
 	}
 
@@ -282,6 +305,11 @@ func (r *Runtime) runTask(t *Task, cfg TaskConfig) {
 
 	// 广播结束信号
 	r.broadcast(t, agent.DisplayItem{Done: true, Source: "task_end"})
+
+	// 任务完成后回调 (web 层保存 chat history)
+	if cfg.OnComplete != nil && finalContent != "" {
+		cfg.OnComplete(t.State.UserID, cfg.SessionID, finalContent)
+	}
 }
 
 // consumeInbox 消费 teammate 收到的消息
@@ -302,9 +330,15 @@ func (r *Runtime) consumeInbox(t *Task) {
 
 // broadcast 广播输出给所有订阅者
 func (r *Runtime) broadcast(t *Task, item agent.DisplayItem) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	t.displayHistory = append(t.displayHistory, item)
+	subs := make([]chan agent.DisplayItem, 0, len(t.subscribers))
 	for ch := range t.subscribers {
+		subs = append(subs, ch)
+	}
+	t.mu.Unlock()
+
+	for _, ch := range subs {
 		select {
 		case ch <- item:
 		default:
@@ -322,8 +356,16 @@ func (r *Runtime) Subscribe(taskID string) (<-chan agent.DisplayItem, func(), er
 		return nil, nil, fmt.Errorf("task not found: %s", taskID)
 	}
 
-	ch := make(chan agent.DisplayItem, 64)
+	ch := make(chan agent.DisplayItem, 256)
 	t.mu.Lock()
+	// 重放历史输出给迟到的订阅者（合并同类型 chunk 减少数量）
+	replay := mergeDisplayHistory(t.displayHistory)
+	for _, item := range replay {
+		select {
+		case ch <- item:
+		default:
+		}
+	}
 	t.subscribers[ch] = true
 	t.mu.Unlock()
 
@@ -348,6 +390,26 @@ func (r *Runtime) Abort(taskID string) error {
 	t.Cancel()
 	t.Agent.Abort()
 	return nil
+}
+
+// mergeDisplayHistory 合并同类型连续的 DisplayItem，减少重放数量
+func mergeDisplayHistory(items []agent.DisplayItem) []agent.DisplayItem {
+	if len(items) == 0 {
+		return items
+	}
+	result := make([]agent.DisplayItem, 0, len(items))
+	cur := items[0]
+	for i := 1; i < len(items); i++ {
+		it := items[i]
+		if it.Source == cur.Source && it.Turn == cur.Turn && !it.Done {
+			cur.Content += it.Content
+		} else {
+			result = append(result, cur)
+			cur = it
+		}
+	}
+	result = append(result, cur)
+	return result
 }
 
 // Resume 恢复暂停的任务(计划审批后)
@@ -417,6 +479,9 @@ func (r *Runtime) Restore() error {
 			continue
 		}
 		for _, state := range states {
+			// WAL 恢复: 重放未完成的写操作
+			r.store.WALRecover(uid, state.ID)
+
 			if state.Status == StatusRunning || state.Status == StatusPaused {
 				state.Status = StatusFailed
 				state.Error = "interrupted by server restart"

@@ -120,6 +120,8 @@ async function sendMessage() {
   bubble.appendChild(typingEl);
 
   var fullContent = '';
+  var thinkingContent = '';
+  var thinkingEl = null;
   currentTaskId = null;
   abortController = new AbortController();
 
@@ -165,7 +167,7 @@ async function sendMessage() {
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
+    streamLoop: while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -181,10 +183,25 @@ async function sendMessage() {
         let d;
         try { d = JSON.parse(jsonStr); } catch(e) { continue; }
 
-        if (d.source === 'final' && d.content) {
+        if (d.source === 'thinking' && d.content) {
           if (typingEl.parentNode) typingEl.remove();
+          thinkingContent += d.content;
+          if (!thinkingEl) {
+            thinkingEl = document.createElement('div');
+            thinkingEl.className = 'msg-thinking';
+            bubble.appendChild(thinkingEl);
+          }
+          thinkingEl.innerHTML = '<div class="thinking-header">💭 思考中…</div><div class="thinking-body">' + escHtml(thinkingContent) + '</div>';
+          var container = document.getElementById('chatMessages');
+          container.scrollTop = container.scrollHeight;
+        } else if (d.source === 'final' && d.content) {
+          if (typingEl.parentNode) typingEl.remove();
+          if (thinkingEl) {
+            thinkingEl.innerHTML = '<div class="thinking-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==\'none\'?\'block\':\'none\'">💭 思考过程 (' + thinkingContent.length + ' 字符) — 点击折叠/展开</div><div class="thinking-body" style="display:none">' + escHtml(thinkingContent) + '</div>';
+          }
           fullContent += d.content;
           bubble.innerHTML = renderMarkdown(fullContent);
+          if (thinkingEl) bubble.insertBefore(thinkingEl, bubble.firstChild);
           const container = document.getElementById('chatMessages');
           container.scrollTop = container.scrollHeight;
         } else if (d.source === 'tool' && d.content) {
@@ -207,7 +224,7 @@ async function sendMessage() {
           if (typingEl.parentNode) typingEl.remove();
           fullContent += d.content;
           bubble.innerHTML = renderMarkdown(fullContent);
-        } else if (d.done) {
+        } else if (d.done || d.source === 'task_end') {
           if (typingEl.parentNode) typingEl.remove();
           if (!fullContent && d.content) {
             fullContent = d.content;
@@ -215,6 +232,7 @@ async function sendMessage() {
           } else if (!fullContent) {
             bubble.innerHTML = renderMarkdown('Task completed.');
           }
+          break streamLoop;
         }
       }
     }
@@ -540,6 +558,8 @@ async function sendMessageText(text) {
   bubble.appendChild(typingEl);
 
   var fullContent = '';
+  var thinkingContent = '';
+  var thinkingEl = null;
   abortController = new AbortController();
 
   try {
@@ -559,7 +579,7 @@ async function sendMessageText(text) {
     var decoder = new TextDecoder();
     var buffer = '';
 
-    while (true) {
+    streamLoop2: while (true) {
       var result = await reader.read();
       if (result.done) break;
 
@@ -576,10 +596,25 @@ async function sendMessageText(text) {
         var d;
         try { d = JSON.parse(jsonStr); } catch(e) { continue; }
 
-        if (d.source === 'final' && d.content) {
+        if (d.source === 'thinking' && d.content) {
           if (typingEl.parentNode) typingEl.remove();
+          thinkingContent += d.content;
+          if (!thinkingEl) {
+            thinkingEl = document.createElement('div');
+            thinkingEl.className = 'msg-thinking';
+            bubble.appendChild(thinkingEl);
+          }
+          thinkingEl.innerHTML = '<div class="thinking-header">💭 思考中…</div><div class="thinking-body">' + escHtml(thinkingContent) + '</div>';
+          var container = document.getElementById('chatMessages');
+          container.scrollTop = container.scrollHeight;
+        } else if (d.source === 'final' && d.content) {
+          if (typingEl.parentNode) typingEl.remove();
+          if (thinkingEl) {
+            thinkingEl.innerHTML = '<div class="thinking-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==\'none\'?\'block\':\'none\'">💭 思考过程 (' + thinkingContent.length + ' 字符) — 点击折叠/展开</div><div class="thinking-body" style="display:none">' + escHtml(thinkingContent) + '</div>';
+          }
           fullContent += d.content;
           bubble.innerHTML = renderMarkdown(fullContent);
+          if (thinkingEl) bubble.insertBefore(thinkingEl, bubble.firstChild);
           var container = document.getElementById('chatMessages');
           container.scrollTop = container.scrollHeight;
         } else if (d.source === 'tool' && d.content) {
@@ -594,7 +629,7 @@ async function sendMessageText(text) {
           if (typingEl.parentNode) typingEl.remove();
           fullContent += d.content;
           bubble.innerHTML = renderMarkdown(fullContent);
-        } else if (d.done) {
+        } else if (d.done || d.source === 'task_end') {
           if (typingEl.parentNode) typingEl.remove();
           if (!fullContent && d.content) {
             fullContent = d.content;
@@ -602,6 +637,7 @@ async function sendMessageText(text) {
           } else if (!fullContent) {
             bubble.innerHTML = renderMarkdown('Task completed.');
           }
+          break streamLoop2;
         }
       }
     }

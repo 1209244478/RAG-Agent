@@ -10,7 +10,7 @@ import (
 // ==================== JWT 测试 ====================
 
 func TestJWTManager_GenerateAndParse(t *testing.T) {
-	mgr := NewJWTManager("test-secret-key", 24)
+	mgr, _ := NewJWTManager("test-secret-key", 24)
 
 	token, err := mgr.GenerateToken(42, "test@example.com")
 	if err != nil {
@@ -38,7 +38,7 @@ func TestJWTManager_GenerateAndParse(t *testing.T) {
 func TestJWTManager_ExpiredToken(t *testing.T) {
 	// jwt v5 的 ParseWithClaims 默认验证 exp, 但有 clock skew 容忍
 	// 使用 -24 小时确保远超 skew 容忍范围
-	mgr := NewJWTManager("test-secret", -24)
+	mgr, _ := NewJWTManager("test-secret", -24)
 
 	token, err := mgr.GenerateToken(1, "expired@test.com")
 	if err != nil {
@@ -54,7 +54,7 @@ func TestJWTManager_ExpiredToken(t *testing.T) {
 }
 
 func TestJWTManager_InvalidToken(t *testing.T) {
-	mgr := NewJWTManager("test-secret", 24)
+	mgr, _ := NewJWTManager("test-secret", 24)
 
 	// 无效 token 字符串
 	_, err := mgr.ParseToken("invalid.token.string")
@@ -70,8 +70,8 @@ func TestJWTManager_InvalidToken(t *testing.T) {
 }
 
 func TestJWTManager_WrongSecret(t *testing.T) {
-	mgr1 := NewJWTManager("secret-1", 24)
-	mgr2 := NewJWTManager("secret-2", 24)
+	mgr1, _ := NewJWTManager("secret-1", 24)
+	mgr2, _ := NewJWTManager("secret-2", 24)
 
 	token, _ := mgr1.GenerateToken(1, "test@test.com")
 
@@ -83,32 +83,31 @@ func TestJWTManager_WrongSecret(t *testing.T) {
 }
 
 func TestJWTManager_DefaultSecret(t *testing.T) {
-	// 空密钥应使用默认值
-	mgr := NewJWTManager("", 24)
-	token, err := mgr.GenerateToken(1, "test@test.com")
-	if err != nil {
-		t.Fatalf("空密钥应使用默认值: %v", err)
+	// 空密钥应返回错误（不安全）
+	mgr, err := NewJWTManager("", 24)
+	if err == nil {
+		t.Fatal("空密钥应返回错误")
 	}
-	if token == "" {
-		t.Fatal("token 不应为空")
+	if mgr != nil {
+		t.Fatal("空密钥不应返回 manager")
 	}
 }
 
 func TestJWTManager_DefaultExpiration(t *testing.T) {
 	// expirationHours <= 0 应默认 72
-	mgr := NewJWTManager("test", 0)
+	mgr, _ := NewJWTManager("test", 0)
 	if mgr.expiration != 72*time.Hour {
 		t.Errorf("默认过期时间应为 72h, 实际 %v", mgr.expiration)
 	}
 
-	mgr = NewJWTManager("test", -5)
+	mgr, _ = NewJWTManager("test", -5)
 	if mgr.expiration != 72*time.Hour {
 		t.Errorf("负过期时间应默认 72h, 实际 %v", mgr.expiration)
 	}
 }
 
 func TestJWTManager_WrongSigningMethod(t *testing.T) {
-	mgr := NewJWTManager("test-secret", 24)
+	mgr, _ := NewJWTManager("test-secret", 24)
 	token, _ := mgr.GenerateToken(1, "test@test.com")
 
 	// 篡改 alg 头的 token 应被拒绝 (这里只验证正常 token 能解析)
@@ -512,7 +511,7 @@ func TestAuth_FullWorkflow(t *testing.T) {
 	}
 
 	// 3. 创建 JWT
-	jwtMgr := NewJWTManager("workflow-secret", 24)
+	jwtMgr, _ := NewJWTManager("workflow-secret", 24)
 	token, err := jwtMgr.GenerateToken(user.ID, user.Email)
 	if err != nil {
 		t.Fatalf("生成 token 失败: %v", err)

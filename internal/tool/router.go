@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -572,12 +573,24 @@ func (r *Router) doFilePatch(args map[string]any) *agent.StepOutcome {
 	}
 
 	updated := strings.Replace(fullText, oldContent, newContent, 1)
+	// 写入前备份原文件，便于失败时回滚
+	backupPath := path + ".bak"
+	if err := os.WriteFile(backupPath, data, 0644); err != nil {
+		return &agent.StepOutcome{
+			Data:       map[string]any{"status": "error", "msg": fmt.Sprintf("备份失败: %v", err)},
+			NextPrompt: "\n",
+		}
+	}
 	if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
+		// 写入失败，尝试回滚
+		os.Rename(backupPath, path)
 		return &agent.StepOutcome{
 			Data:       map[string]any{"status": "error", "msg": err.Error()},
 			NextPrompt: "\n",
 		}
 	}
+	// 写入成功，删除备份
+	os.Remove(backupPath)
 
 	return &agent.StepOutcome{
 		Data:       map[string]any{"status": "success", "msg": "文件局部修改成功"},
@@ -617,10 +630,81 @@ func (r *Router) doSkillRun(args map[string]any, response *llm.Response) *agent.
 		}
 	}
 
+	// 权限检查: 读取 skill_permissions.json
+	if r.SkillDir != "" {
+		if permData, err := os.ReadFile(filepath.Join(r.SkillDir, "skill_permissions.json")); err == nil {
+			var perms struct {
+				Deny  []string `json:"deny"`
+				Allow []string `json:"allow"`
+			}
+			if json.Unmarshal(permData, &perms) == nil {
+				allowed := true
+				for _, p := range perms.Deny {
+					if matchToolSkillPattern(p, skillName) {
+						allowed = false
+						break
+					}
+				}
+				if allowed && len(perms.Allow) > 0 {
+					allowed = false
+					for _, p := range perms.Allow {
+						if matchToolSkillPattern(p, skillName) {
+							allowed = true
+							break
+						}
+					}
+				}
+				if !allowed {
+					return &agent.StepOutcome{
+						Data:       map[string]any{"status": "error", "msg": "Skill denied by permission policy: " + skillName},
+						NextPrompt: "技能被权限策略拒绝。如需使用, 请修改 skill_permissions.json。\n",
+					}
+				}
+			}
+		}
+	}
+
 	skillArgs, _ := json.Marshal(args)
 
 	skillPath := filepath.Join(r.SkillDir, skillName+".py")
 	if _, err := os.Stat(skillPath); err != nil {
+		// 纯提示词 skill fallback: 无 .py 但有 SKILL.md 的目录
+		skillMdPath := filepath.Join(r.SkillDir, skillName, "SKILL.md")
+		if mdData, mdErr := os.ReadFile(skillMdPath); mdErr == nil {
+			skillDirAbs := filepath.Join(r.SkillDir, skillName)
+			processed := substituteSkillVars(string(mdData), args, skillDirAbs, skillName)
+			// 执行内联 shell 命令 (!`cmd` 和 ```!cmd```)
+			processed = r.executeInlineShell(processed, skillDirAbs)
+
+			// 检测 context: fork — 隔离子 agent 执行
+			fm, _ := parseSkillFrontmatter(string(mdData))
+			if fm["context"] == "fork" && r.TaskRuntime != nil {
+				return r.runSkillFork(skillName, processed, args, skillDirAbs)
+			}
+
+			action := strArg(args, "action", "")
+			fileName := strArg(args, "file", "")
+			// read_file 读取 SKILL.md 或目录内其他文件
+			if action == "read_file" || action == "read_md" || action == "info" || action == "" {
+				targetPath := skillMdPath
+				if fileName != "" && fileName != "SKILL.md" {
+					targetPath = filepath.Join(r.SkillDir, skillName, fileName)
+				}
+				if content, fErr := os.ReadFile(targetPath); fErr == nil {
+					processedContent := substituteSkillVars(string(content), args, skillDirAbs, skillName)
+					processedContent = r.executeInlineShell(processedContent, skillDirAbs)
+					return &agent.StepOutcome{
+						Data:       map[string]any{"status": "success", "content": processedContent, "skill": skillName, "type": "prompt"},
+						NextPrompt: "\n",
+					}
+				}
+			}
+			// 其他 action: 返回处理后的 SKILL.md 内容供 LLM 参考后自行执行
+			return &agent.StepOutcome{
+				Data:       map[string]any{"status": "success", "content": processed, "skill": skillName, "type": "prompt", "note": "提示词技能, 请阅读 SKILL.md 后按指导执行 (可能需要 code_run/bash 调用外部命令)"},
+				NextPrompt: "\n",
+			}
+		}
 		return &agent.StepOutcome{
 			Data:       map[string]any{"status": "error", "msg": fmt.Sprintf("Skill not found: %s", skillName)},
 			NextPrompt: "\n",
@@ -659,9 +743,11 @@ func (r *Router) doSkillRun(args map[string]any, response *llm.Response) *agent.
 }
 
 func (r *Router) runCode(code, codeType string, timeout int, cwd string) (map[string]any, error) {
-	var cmd *exec.Cmd
 	tmpPath := ""
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
 
+	var cmd *exec.Cmd
 	switch codeType {
 	case "python", "py":
 		tmpFile, err := os.CreateTemp(cwd, "*.ai.py")
@@ -671,21 +757,17 @@ func (r *Router) runCode(code, codeType string, timeout int, cwd string) (map[st
 		tmpPath = tmpFile.Name()
 		tmpFile.WriteString(code)
 		tmpFile.Close()
-		cmd = exec.Command(r.PythonPath, "-X", "utf8", "-u", tmpPath)
+		cmd = exec.CommandContext(ctx, r.PythonPath, "-X", "utf8", "-u", tmpPath)
 	case "powershell", "bash", "sh", "shell":
 		if isWindows() {
-			cmd = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", code)
+			cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", code)
 		} else {
-			cmd = exec.Command("bash", "-c", code)
+			cmd = exec.CommandContext(ctx, "bash", "-c", code)
 		}
 	default:
 		return nil, fmt.Errorf("不支持的类型: %s", codeType)
 	}
 
-	cmd.Dir = cwd
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
-	defer cancel()
-	cmd = exec.CommandContext(ctx, cmd.Args[0], cmd.Args[1:]...)
 	cmd.Dir = cwd
 
 	var stdout, stderr bytes.Buffer
@@ -791,6 +873,312 @@ func extractCodeBlock(content, codeType string) string {
 		return ""
 	}
 	return strings.TrimSpace(matches[len(matches)-1][1])
+}
+
+// parseSkillFrontmatter 解析 SKILL.md 的 frontmatter (轻量版, 仅返回 map)
+func parseSkillFrontmatter(content string) (map[string]string, string) {
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return nil, content
+	}
+	fm := map[string]string{}
+	i := 1
+	for i < len(lines) {
+		line := lines[i]
+		if strings.TrimSpace(line) == "---" {
+			i++
+			break
+		}
+		idx := strings.Index(line, ":")
+		if idx > 0 {
+			key := strings.TrimSpace(line[:idx])
+			val := strings.TrimSpace(line[idx+1:])
+			if len(val) >= 2 {
+				if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+					val = val[1 : len(val)-1]
+				}
+			}
+			fm[strings.ToLower(key)] = val
+		}
+		i++
+	}
+	body := strings.Join(lines[i:], "\n")
+	return fm, body
+}
+
+// matchToolSkillPattern 前缀/通配匹配 (支持 * 后缀)
+func matchToolSkillPattern(pattern, name string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.HasSuffix(pattern, "*") {
+		prefix := strings.TrimSuffix(pattern, "*")
+		return strings.HasPrefix(name, prefix)
+	}
+	return pattern == name
+}
+
+// runSkillFork 在隔离子 agent 中执行 skill (context: fork)
+// 参考 cc-haha fork: 独立 token 预算, 不污染主上下文
+func (r *Router) runSkillFork(skillName, skillPrompt string, args map[string]any, skillDir string) *agent.StepOutcome {
+	timeoutSec := intArg(args, "timeout", 300)
+	if timeoutSec > 600 {
+		timeoutSec = 600
+	}
+
+	// 递归 fork 守卫
+	var parentForkDepth int
+	if r.CurrentTaskID != "" {
+		if parentTask, err := r.TaskRuntime.Get(r.CurrentTaskID); err == nil {
+			parentForkDepth = parentTask.State.ForkDepth
+		}
+	}
+	const maxForkDepth = 3
+	if parentForkDepth >= maxForkDepth {
+		return &agent.StepOutcome{
+			Data:       map[string]any{"status": "error", "msg": fmt.Sprintf("max fork depth %d exceeded", maxForkDepth)},
+			NextPrompt: fmt.Sprintf("Skill fork 失败: 已达最大 fork 深度 %d", maxForkDepth),
+		}
+	}
+
+	// 构造 cache safe params
+	var cacheSafe *task.CacheSafeParams
+	if r.CurrentTaskID != "" {
+		if parentTask, err := r.TaskRuntime.Get(r.CurrentTaskID); err == nil && parentTask.Agent != nil {
+			cacheSafe = &task.CacheSafeParams{
+				Model:        parentTask.Agent.Model,
+				Temperature:  parentTask.Agent.Temperature,
+				MaxTokens:    parentTask.Agent.MaxTokens,
+				SystemPrompt: parentTask.Agent.SystemPrompt,
+			}
+		}
+	}
+
+	// 解析 allowed-tools 限制
+	fm, _ := parseSkillFrontmatter(skillPrompt)
+	allowedTools := ""
+	if v, ok := fm["allowed-tools"]; ok && v != "" {
+		allowedTools = v
+	}
+
+	// 构造 fork prompt: skill 指导 + 参数上下文
+	forkPrompt := fmt.Sprintf("[Skill: %s (fork mode)]\n\n%s", skillName, skillPrompt)
+	if allowedTools != "" {
+		forkPrompt += fmt.Sprintf("\n\n[注意: 本 skill 限制可用工具为: %s]", allowedTools)
+	}
+
+	subTask, err := r.TaskRuntime.Start(task.TaskConfig{
+		Type:         task.TypeSubagent,
+		ParentID:     r.CurrentTaskID,
+		Prompt:       forkPrompt,
+		Isolation:    task.IsolationNone, // fork 共享工作目录
+		ForkFrom:     r.CurrentTaskID,
+		Timeout:      time.Duration(timeoutSec) * time.Second,
+		CacheSafe:    cacheSafe,
+		ForkDepth:    parentForkDepth + 1,
+	})
+	if err != nil {
+		return &agent.StepOutcome{
+			Data:       map[string]any{"status": "error", "msg": err.Error()},
+			NextPrompt: fmt.Sprintf("Skill fork 失败: %v", err),
+		}
+	}
+
+	<-subTask.Wait()
+
+	result := "skill 执行完成"
+	if subTask.State.Status == task.StatusFailed {
+		result = fmt.Sprintf("skill 执行失败: %s", subTask.State.Error)
+	} else if subTask.State.Status == task.StatusKilled {
+		result = "skill 执行被中断"
+	}
+
+	// 读取子 agent 输出文件 (如有)
+	if subTask.State.OutputFile != "" {
+		if out, oErr := os.ReadFile(subTask.State.OutputFile); oErr == nil && len(out) > 0 {
+			outStr := string(out)
+			if len(outStr) > 8000 {
+				outStr = outStr[:4000] + "\n...[truncated]...\n" + outStr[len(outStr)-4000:]
+			}
+			result = outStr
+		}
+	}
+
+	return &agent.StepOutcome{
+		Data:       map[string]any{"status": "success", "content": result, "skill": skillName, "type": "fork"},
+		NextPrompt: fmt.Sprintf("Skill [fork] %s 结果:\n%s\n请基于此结果继续。", skillName, result),
+	}
+}
+
+func substituteSkillVars(content string, args map[string]any, skillDir, skillName string) string {
+	// 1. ${SKILL_DIR} -> skill 目录绝对路径
+	content = strings.ReplaceAll(content, "${SKILL_DIR}", skillDir)
+	content = strings.ReplaceAll(content, "${CLAUDE_SKILL_DIR}", skillDir)
+
+	// 2. ${SKILL_NAME}
+	content = strings.ReplaceAll(content, "${SKILL_NAME}", skillName)
+
+	// 3. 解析 $ARGUMENTS 为参数数组, 支持 $ARGUMENTS[0], $1 等索引
+	argStr := ""
+	if s, ok := args["arguments"].(string); ok {
+		argStr = s
+	} else if s, ok := args["args"].(string); ok {
+		argStr = s
+	}
+	parsedArgs := parseShellArgs(argStr)
+
+	// 3a. $ARGUMENTS[0], $ARGUMENTS[1] 索引
+	content = regexp.MustCompile(`\$ARGUMENTS\[(\d+)\]`).ReplaceAllStringFunc(content, func(m string) string {
+		sub := regexp.MustCompile(`\$ARGUMENTS\[(\d+)\]`).FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		idx, _ := strconv.Atoi(sub[1])
+		if idx >= 0 && idx < len(parsedArgs) {
+			return parsedArgs[idx]
+		}
+		return ""
+	})
+
+	// 3b. $0, $1 简写索引 (不匹配 $ARGUMENTS)
+	content = regexp.MustCompile(`\$(\d+)(?!\w)`).ReplaceAllStringFunc(content, func(m string) string {
+		sub := regexp.MustCompile(`\$(\d+)(?!\w)`).FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		idx, _ := strconv.Atoi(sub[1])
+		if idx >= 0 && idx < len(parsedArgs) {
+			return parsedArgs[idx]
+		}
+		return ""
+	})
+
+	// 3c. $ARGUMENTS -> 完整参数字符串
+	content = strings.ReplaceAll(content, "$ARGUMENTS", argStr)
+
+	// 4. 命名参数替换: $key 或 ${key} -> args[key]
+	// 仅替换已知参数键, 避免误伤 markdown 中的 $ 符号
+	for key, val := range args {
+		// 跳过保留字段
+		if key == "skill" || key == "action" || key == "file" || key == "arguments" || key == "args" {
+			continue
+		}
+		strVal := fmt.Sprintf("%v", val)
+		content = strings.ReplaceAll(content, "${"+key+"}", strVal)
+		// $key 后跟空格或行尾, 避免误匹配 $keyXxx
+		content = regexp.MustCompile(`\$`+regexp.QuoteMeta(key)+`([\s\W]|$)`).ReplaceAllString(content, strVal+"$1")
+	}
+
+	return content
+}
+
+// parseShellArgs 将参数字符串解析为参数数组 (简易 shell-quote)
+func parseShellArgs(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var args []string
+	var cur strings.Builder
+	inSingle, inDouble := false, false
+	hasContent := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && !inSingle && i+1 < len(s):
+			// 转义下一字符
+			cur.WriteByte(s[i+1])
+			hasContent = true
+			i++
+		case c == '\'' && !inDouble:
+			inSingle = !inSingle
+			hasContent = true
+		case c == '"' && !inSingle:
+			inDouble = !inDouble
+			hasContent = true
+		case (c == ' ' || c == '\t' || c == '\n') && !inSingle && !inDouble:
+			if hasContent {
+				args = append(args, cur.String())
+				cur.Reset()
+				hasContent = false
+			}
+		default:
+			cur.WriteByte(c)
+			hasContent = true
+		}
+	}
+	if hasContent {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
+// executeInlineShell 在 SKILL.md 内容中执行内联 shell 命令并替换为输出
+// 支持: !`command` (行内) 和 ```!\ncommand\n``` (代码块)
+func (r *Router) executeInlineShell(content string, cwd string) string {
+	// 1. 代码块: ```!\ncommand\n```
+	blockRe := regexp.MustCompile("(?s)```!\\s*\\n(.*?)\\n?```")
+	content = blockRe.ReplaceAllStringFunc(content, func(m string) string {
+		sub := blockRe.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		cmd := strings.TrimSpace(sub[1])
+		out := r.runShellForInline(cmd, cwd)
+		return out
+	})
+
+	// 2. 行内: !`command` (前面必须是行首或空白)
+	inlineRe := regexp.MustCompile("(?m)(?:^|\\s)!`([^`]+)`")
+	content = inlineRe.ReplaceAllStringFunc(content, func(m string) string {
+		sub := inlineRe.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		// 保留前导空白/行首
+		prefix := ""
+		if len(m) > 0 && (m[0] == ' ' || m[0] == '\t') {
+			prefix = string(m[0])
+		}
+		cmd := strings.TrimSpace(sub[1])
+		out := r.runShellForInline(cmd, cwd)
+		// 行内输出压缩为单行
+		out = strings.ReplaceAll(out, "\n", " ")
+		return prefix + out
+	})
+
+	return content
+}
+
+// runShellForInline 执行单条 shell 命令, 返回输出 (stdout+stderr), 超时 30s
+func (r *Router) runShellForInline(command, cwd string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if isWindows() {
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
+	} else {
+		cmd = exec.CommandContext(ctx, "bash", "-c", command)
+	}
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Sprintf("[error: %v]", err)
+	}
+	out := stdout.String()
+	if stderr.Len() > 0 && stdout.Len() == 0 {
+		out = stderr.String()
+	}
+	// 限制输出长度
+	if len(out) > 4000 {
+		out = out[:2000] + "\n...[truncated]...\n" + out[len(out)-2000:]
+	}
+	return strings.TrimRight(out, "\n")
 }
 
 func smartFormat(data string, maxLen int) string {
