@@ -242,9 +242,9 @@ var blockedReadPaths = []string{
 	"/home/",
 	"/var/",
 	"/www/server/",
-	"/opt/genericagent/server.json",
-	"/opt/genericagent/mykey.json",
-	"/opt/genericagent/.env",
+	"/opt/ragagent/server.json",
+		"/opt/ragagent/mykey.json",
+		"/opt/ragagent/.env",
 }
 
 var blockedWritePaths = []string{
@@ -253,9 +253,9 @@ var blockedWritePaths = []string{
 	"/home/",
 	"/var/",
 	"/www/server/",
-	"/opt/genericagent/server.json",
-	"/opt/genericagent/mykey.json",
-	"/opt/genericagent/.env",
+	"/opt/ragagent/server.json",
+	"/opt/ragagent/mykey.json",
+	"/opt/ragagent/.env",
 	"/boot/",
 	"/usr/",
 	"/lib/",
